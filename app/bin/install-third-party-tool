@@ -1,0 +1,65 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+usage() {
+  cat <<'EOF'
+用法：install-third-party-tool <list|install> [工具名]
+
+已批准的第三方工具：
+  gh    GitHub CLI，安装到 $OPENCLAW_PREFIX/tools/gh
+
+本脚本只安装已批准工具；不接受 URL、归档文件路径或系统安装参数。
+EOF
+}
+
+# Help must work from the source tree as well as on fnOS, without requiring
+# the application data directory to exist.
+case "${1:-}" in
+  -h|--help|help)
+    [ "$#" -eq 1 ] || { usage >&2; exit 64; }
+    usage
+    exit 0
+    ;;
+esac
+
+. "$SCRIPT_DIR/env"
+TOOLS_DIR="$OPENCLAW_PREFIX/tools"
+
+list_tools() {
+  if [ -x "$TOOLS_DIR/gh/bin/gh" ]; then
+    printf 'gh\t已安装\t%s\n' "$("$TOOLS_DIR/gh/bin/gh" --version 2>/dev/null | sed -n '1p' || printf '版本未知')"
+  else
+    printf 'gh\t未安装\tGitHub CLI\n'
+  fi
+}
+
+install_tool() {
+  case "$1" in
+    gh)
+      exec /bin/sh "$SCRIPT_DIR/ensure-gh"
+      ;;
+    *)
+      echo "拒绝安装：未登记的第三方工具 '$1'。" >&2
+      echo '请先在项目 tools/TOOL-REGISTRY.md 登记官方来源、版本、架构和 SHA-256，并为该工具添加受控安装实现。' >&2
+      exit 64
+      ;;
+  esac
+}
+
+[ "$#" -ge 1 ] || { usage >&2; exit 64; }
+case "$1" in
+  list)
+    [ "$#" -eq 1 ] || { usage >&2; exit 64; }
+    list_tools
+    ;;
+  install)
+    [ "$#" -eq 2 ] || { usage >&2; exit 64; }
+    install_tool "$2"
+    ;;
+  *)
+    usage >&2
+    exit 64
+    ;;
+esac

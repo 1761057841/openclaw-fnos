@@ -1,0 +1,17 @@
+{
+  ".url": {
+    "openclaw.main": {
+      "title": "OpenClaw",
+      "icon": "images/icon.PNG",
+      "type": "iframe",
+      "protocol": "",
+      "gatewayPrefix": "/app/openclaw",
+      "gatewaySocket": "app.sock",
+      "url": "/app/openclaw",
+      "allUsers": false,
+      "control": {
+        "accessPerm": "editable"
+      }
+    }
+  }
+}

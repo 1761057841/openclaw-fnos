@@ -1,0 +1,38 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPT_DIR/env"
+
+command -v curl >/dev/null 2>&1 || {
+  echo "curl is required to install the OpenClaw runtime" >&2
+  exit 1
+}
+
+runtime_works() {
+  [ -x "$OPENCLAW_PREFIX/bin/openclaw" ] || return 1
+  "$OPENCLAW_PREFIX/bin/openclaw" --version >/dev/null 2>&1
+}
+
+# Repair an existing installation first. This avoids relying on the installer
+# to overwrite a stale launcher after a Node-only upgrade.
+if [ -f "$SCRIPT_DIR/repair-openclaw" ] && /bin/sh "$SCRIPT_DIR/repair-openclaw" >/dev/null 2>&1; then
+  exit 0
+fi
+
+if runtime_works; then
+  exit 0
+fi
+
+# The Node-only installer can leave an old openclaw launcher pointing at a
+# removed node-v* directory. Re-run the official runtime installer, then
+# repair the launcher against the current private Node alias.
+mkdir -p "$OPENCLAW_PREFIX"
+curl -fsSL --proto '=https' --tlsv1.2 https://openclaw.ai/install-cli.sh \
+  | /bin/bash -s -- --prefix "$OPENCLAW_PREFIX" --no-onboard --runtime-only
+
+/bin/sh "$SCRIPT_DIR/repair-openclaw" >/dev/null
+runtime_works || {
+  echo "OpenClaw runtime installation completed but the CLI is not runnable" >&2
+  exit 1
+}

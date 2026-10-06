@@ -1,0 +1,13 @@
+appname=openclaw
+version=1.5.3
+display_name=OpenClaw
+desc=Official OpenClaw runtime for fnOS with an isolated Node runtime.
+source=thirdparty
+platform=all
+maintainer=OpenClaw fnOS
+maintainer_url=https://openclaw.ai
+os_min_version=1.1.3100
+desktop_uidir=ui
+desktop_applaunchname=openclaw.main
+ctl_stop=true
+checkport=false

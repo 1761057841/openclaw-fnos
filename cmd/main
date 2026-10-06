@@ -1,0 +1,177 @@
+#!/bin/sh
+set -eu
+
+APP_ROOT="${TRIM_APPDEST:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}"
+# In fnOS, TRIM_APPDEST already points at the target payload directory.
+# The fallback keeps this script runnable directly from the source tree.
+if [ -x "$APP_ROOT/bin/start" ]; then
+  BIN="$APP_ROOT/bin"
+else
+  BIN="$APP_ROOT/target/bin"
+fi
+PID_FILE="${TRIM_PKGVAR:-$APP_ROOT/var}/openclaw.pid"
+# Keep the complete process log in persistent package data. TRIM_TEMP_LOGFILE
+# is only a lifecycle diagnostic surface and may be replaced on the next call.
+LOG_FILE="${TRIM_PKGVAR:-$APP_ROOT/var}/openclaw.log"
+SOCKET_FILE="${TRIM_APPDEST:-$APP_ROOT}/app.sock"
+PACKAGE_USER="${TRIM_USERNAME:-openclaw}"
+SOCKET_GROUP="${TRIM_GROUPNAME:-openclaw}"
+# Keep lifecycle paths compatible with the application runtime environment.
+# The parent PID remains in fnOS's package var directory so stop/upgrade hooks
+# can find it even while the payload is being replaced.
+
+mkdir -p "$(dirname -- "$PID_FILE")"
+
+report_error() {
+  message=$1
+  printf '%s\n' "$message" >&2
+  if [ -n "${TRIM_TEMP_LOGFILE:-}" ]; then
+    printf '%s\n' "$message" >"$TRIM_TEMP_LOGFILE" 2>/dev/null || true
+  fi
+}
+
+prepare_app_data() {
+  # env creates the data layout and first-run credentials. Do that while the
+  # lifecycle hook is still root, then hand the persistent tree to the
+  # service user before dropping privileges.
+  if ! getent passwd "$PACKAGE_USER" >/dev/null 2>&1; then
+    echo "The fnOS package user is unavailable: $PACKAGE_USER" >&2
+    return 1
+  fi
+  if [ ! -f "$BIN/env" ]; then
+    echo "The application environment script is missing" >&2
+    return 1
+  fi
+  # shellcheck disable=SC1090
+  . "$BIN/env"
+  # Earlier builds initialized these paths as root before dropping privileges.
+  # Repair only known application-managed directories. Do not recursively
+  # change arbitrary files a user may keep at the data-directory root.
+  [ -d "$OPENCLAW_APP_DATA" ] || mkdir -p "$OPENCLAW_APP_DATA"
+  chown "$PACKAGE_USER:$SOCKET_GROUP" "$OPENCLAW_APP_DATA"
+  # env creates HOME before the service user exists. npm also needs to create
+  # its cache directly under HOME, so repair the complete application-owned
+  # HOME tree before dropping privileges.
+  for path in "$HOME" "$OPENCLAW_CONFIG_DIR" "$OPENCLAW_WORKSPACE_DIR" "$GH_CONFIG_DIR" "$OPENCLAW_RUNTIME_DIR" "$OPENCLAW_PREFIX"; do
+    [ -d "$path" ] || mkdir -p "$path"
+    chown -R "$PACKAGE_USER:$SOCKET_GROUP" "$path"
+    chmod 700 "$path"
+  done
+  if [ -f "$GATEWAY_TOKEN_FILE" ]; then
+    chown "$PACKAGE_USER:$SOCKET_GROUP" "$GATEWAY_TOKEN_FILE"
+    chmod 600 "$GATEWAY_TOKEN_FILE"
+  fi
+}
+
+start_as_package_user() {
+  # fnOS images do not all ship util-linux runuser. Prefer it when present,
+  # then fall back to the commonly available su or setpriv implementations.
+  if command -v runuser >/dev/null 2>&1; then
+    nohup runuser -u "$PACKAGE_USER" --preserve-environment -- "$BIN/start" >>"$LOG_FILE" 2>&1 </dev/null &
+    CHILD_PID=$!
+    return 0
+  fi
+  if command -v su >/dev/null 2>&1; then
+    nohup su -s /bin/sh -p "$PACKAGE_USER" -c "exec \"$BIN/start\"" >>"$LOG_FILE" 2>&1 </dev/null &
+    CHILD_PID=$!
+    return 0
+  fi
+  if command -v setpriv >/dev/null 2>&1; then
+    nohup setpriv --reuid="$PACKAGE_USER" --regid="$SOCKET_GROUP" --init-groups -- "$BIN/start" >>"$LOG_FILE" 2>&1 </dev/null &
+    CHILD_PID=$!
+    return 0
+  fi
+  report_error "No privilege-drop command available (runuser, su, or setpriv)"
+  return 1
+}
+
+is_running() {
+  [ -s "$PID_FILE" ] || return 1
+  set -- $(cat "$PID_FILE" 2>/dev/null || true)
+  pid=${1:-}
+  started=${2:-}
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  [ -r "/proc/$pid/stat" ] || return 1
+  current_started=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true)
+  [ -n "$current_started" ] || return 1
+  # New PID records include Linux process start ticks, preventing a reused PID
+  # from being mistaken for this package after a crash. Accept legacy records
+  # only when their command line still identifies this installed application.
+  if [ -n "$started" ]; then
+    [ "$started" = "$current_started" ]
+    return
+  fi
+  tr '\000' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -F "$BIN/start" >/dev/null 2>&1
+}
+
+start_app() {
+  if is_running; then
+    return 0
+  fi
+  if [ -z "${TRIM_APPDEST:-}" ] || [ ! -d "$TRIM_APPDEST" ]; then
+    report_error "TRIM_APPDEST must name the installed target directory"
+    return 1
+  fi
+  if ! getent passwd "$PACKAGE_USER" >/dev/null 2>&1 || ! getent group "$SOCKET_GROUP" >/dev/null 2>&1; then
+    report_error "The fnOS package user/group is unavailable: $PACKAGE_USER:$SOCKET_GROUP"
+    return 1
+  fi
+  prepare_app_data || return 1
+  chgrp "$SOCKET_GROUP" "$TRIM_APPDEST"
+  # Let the package group create its socket while sticky-bit protection keeps
+  # package-owned target files from being removed by another group member.
+  chmod 1730 "$TRIM_APPDEST"
+  touch "$LOG_FILE"
+  chown "$PACKAGE_USER:$SOCKET_GROUP" "$LOG_FILE"
+  chmod 640 "$LOG_FILE"
+  rm -f "$SOCKET_FILE"
+  rm -f "$PID_FILE"
+  if ! start_as_package_user; then
+    return 1
+  fi
+  child_started=$(awk '{print $22}' "/proc/$CHILD_PID/stat" 2>/dev/null || true)
+  if [ -z "$child_started" ]; then
+    report_error "Unable to identify dispatched service process: $CHILD_PID"
+    kill "$CHILD_PID" 2>/dev/null || true
+    return 1
+  fi
+  printf '%s %s\n' "$CHILD_PID" "$child_started" >"$PID_FILE"
+  printf '%s\n' "[lifecycle] start dispatched pid=$(cat "$PID_FILE") user=$PACKAGE_USER log=$LOG_FILE" >>"$LOG_FILE"
+  # fnOS treats the lifecycle script's return value as the start result. The
+  # child may still be preparing its runtime, so status performs the later
+  # liveness check instead of failing start after an arbitrary one-second wait.
+  return 0
+}
+
+stop_app() {
+  if ! is_running; then
+    rm -f "$PID_FILE"
+    rm -f "$SOCKET_FILE"
+    return 0
+  fi
+  set -- $(cat "$PID_FILE")
+  pid=$1
+  kill "$pid" 2>/dev/null || true
+  i=0
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 20 ]; do
+    sleep 1
+    i=$((i + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    for child_pid in $(ps -o pid= --ppid "$pid" 2>/dev/null || true); do
+      kill "$child_pid" 2>/dev/null || true
+    done
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  rm -f "$PID_FILE"
+  rm -f "$SOCKET_FILE"
+}
+
+case "${1:-status}" in
+  start) start_app ;;
+  stop) stop_app ;;
+  restart) stop_app; start_app ;;
+  status) is_running && exit 0 || exit 3 ;;
+  *) echo "usage: $0 {start|stop|restart|status}" >&2; exit 1 ;;
+esac

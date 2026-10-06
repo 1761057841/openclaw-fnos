@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+
+# Runtime installation is deliberately deferred until first start. This keeps
+# package installation lightweight and lets the official installer choose the
+# current supported OpenClaw/Node release.
+exit 0

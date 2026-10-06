@@ -1,0 +1,29 @@
+[
+  {
+    "stepTitle": "卸载数据",
+    "items": [
+      {
+        "type": "radio",
+        "field": "wizard_uninstall_data",
+        "label": "卸载时如何处理 OpenClaw 数据？",
+        "initValue": "keep-data",
+        "options": [
+          {
+            "label": "保留数据，方便以后重新安装",
+            "value": "keep-data"
+          },
+          {
+            "label": "删除全部数据、配置、会话和运行时",
+            "value": "delete-data"
+          }
+        ],
+        "rules": [
+          {
+            "required": true,
+            "message": "请选择数据处理方式"
+          }
+        ]
+      }
+    ]
+  }
+]

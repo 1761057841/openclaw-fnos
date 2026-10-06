@@ -1,0 +1,101 @@
+#!/bin/sh
+set -u
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPT_DIR/env"
+export OPENCLAW_APP_BIN="$SCRIPT_DIR"
+
+log() {
+  printf '%s\n' "$1" >>"$OPENCLAW_LOG_FILE"
+}
+
+# Keep each service start focused on its current run. The lifecycle wrapper
+# already prepares and owns this file before dropping to the package user.
+mkdir -p "$(dirname -- "$OPENCLAW_LOG_FILE")"
+: >"$OPENCLAW_LOG_FILE"
+log "[management] start pid=$$ uid=$(id -u) user=$(id -un) app_data=$APP_DATA prefix=$PREFIX"
+
+mkdir -p "$APP_DATA/runtime"
+if [ -z "${TRIM_APPDEST:-}" ]; then
+  log '[management] TRIM_APPDEST is required for the fnOS gateway socket'
+  exit 1
+fi
+if [ -e "$OPENCLAW_MANAGEMENT_SOCKET" ] && [ ! -S "$OPENCLAW_MANAGEMENT_SOCKET" ]; then
+  log "[management] refusing to replace a non-socket at the gateway socket path: $OPENCLAW_MANAGEMENT_SOCKET"
+  exit 1
+fi
+rm -f "$OPENCLAW_MANAGEMENT_SOCKET"
+
+find_node() {
+  NODE_BIN="$PREFIX/tools/node/bin/node"
+  if [ -x "$NODE_BIN" ]; then
+    return 0
+  fi
+  for candidate in "$PREFIX"/tools/node-v*/bin/node; do
+    if [ -x "$candidate" ]; then
+      NODE_BIN="$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Prepare or repair the private runtime at most once. The management UI only
+# needs Node; an unavailable OpenClaw CLI must not prevent the UI from starting.
+if ! "$SCRIPT_DIR/ensure-runtime" >>"$OPENCLAW_LOG_FILE" 2>&1; then
+  log '[runtime] OpenClaw runtime unavailable; continuing with management UI startup'
+fi
+if ! find_node; then
+  log '[management] private Node runtime unavailable; management UI cannot start'
+  exit 1
+fi
+log "[management] using node=$NODE_BIN"
+
+"$NODE_BIN" "$SCRIPT_DIR/control-ui.js" >>"$OPENCLAW_LOG_FILE" 2>&1 &
+UI_PID=$!
+echo "$UI_PID" >"$APP_DATA/runtime/ui.pid"
+log "[management] UI child started pid=$UI_PID"
+
+# GitHub CLI is optional and its first-run download can take minutes or fail
+# on a restricted network. Never hold the management UI or Gateway startup on
+# this external request; the overview button remains available for retry.
+(
+  if ! /bin/sh "$SCRIPT_DIR/ensure-gh" >>"$OPENCLAW_LOG_FILE" 2>&1; then
+    log '[runtime] GitHub CLI unavailable; gh commands will remain unavailable'
+  else
+    log '[runtime] GitHub CLI is ready'
+  fi
+) &
+GH_INSTALL_PID=$!
+
+# Gateway is a separate child. Runtime preparation already happened once;
+# failure here must not take down the management UI.
+GATEWAY_PID=""
+if [ -x "$PREFIX/bin/openclaw" ] && "$PREFIX/bin/openclaw" --version >/dev/null 2>&1; then
+  # Let OpenClaw resolve the port from openclaw.json. The wrapper only seeds
+  # 18790 when creating a brand-new configuration.
+  "$SCRIPT_DIR/openclaw" gateway run --bind lan --allow-unconfigured >>"$OPENCLAW_LOG_FILE" 2>&1 &
+  GATEWAY_PID=$!
+  echo "$GATEWAY_PID" >"$OPENCLAW_GATEWAY_PID_FILE"
+else
+  log '[gateway] OpenClaw runtime is unavailable; management UI remains available'
+  rm -f "$OPENCLAW_GATEWAY_PID_FILE"
+fi
+
+cleanup() {
+  if [ -n "$GATEWAY_PID" ]; then kill "$GATEWAY_PID" 2>/dev/null || true; fi
+  if [ -n "${GH_INSTALL_PID:-}" ]; then kill "$GH_INSTALL_PID" 2>/dev/null || true; fi
+  kill "$UI_PID" 2>/dev/null || true
+  wait "$GATEWAY_PID" 2>/dev/null || true
+  wait "$UI_PID" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+# Keep fnOS's lifecycle parent alive while the management UI is alive.
+while kill -0 "$UI_PID" 2>/dev/null; do
+  sleep 2
+done
+wait "$UI_PID" 2>/dev/null
+UI_STATUS=$?
+log "[management] UI child exited status=$UI_STATUS"
+exit "$UI_STATUS"

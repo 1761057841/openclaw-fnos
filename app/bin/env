@@ -1,0 +1,120 @@
+#!/bin/sh
+set -eu
+
+APP_HOME="${TRIM_PKGHOME:-/vol1/@apphome/openclaw}"
+LEGACY_APP_HOME="${OPENCLAW_LEGACY_APP_HOME:-/vol1/@apphome/openclaw.fnos}"
+if [ -z "${OPENCLAW_APP_DATA:-}" ]; then
+  if [ ! -d "$APP_HOME/data" ] && [ -d "$LEGACY_APP_HOME/data" ]; then
+    APP_DATA="$LEGACY_APP_HOME/data"
+  else
+    APP_DATA="$APP_HOME/data"
+  fi
+else
+  APP_DATA="$OPENCLAW_APP_DATA"
+fi
+# The runtime prefix and HOME names intentionally mirror their contents:
+# `home` holds Node/OpenClaw/private third-party tools; `openclaw` holds
+# OpenClaw state, configuration, workspace, and CLI authentication.
+PREFIX="$APP_DATA/home"
+HOME_DIR="$APP_DATA/openclaw"
+
+# A completely fresh installation has no application data directory yet.
+# Create its root before writing the one-time layout marker below; otherwise
+# `set -e` makes first startup exit before the lifecycle can hand ownership to
+# the package user.
+mkdir -p "$APP_DATA"
+
+# Upgrade existing 1.5.x installations without losing data. The old layout
+# used the inverse names: data/openclaw was the runtime prefix and data/home
+# was HOME. Swap only when both directory signatures prove that old layout;
+# otherwise leave administrator-created or incomplete directories untouched.
+LAYOUT_MARKER="$APP_DATA/.layout-home-openclaw-v1"
+old_prefix_detected=0
+old_home_detected=0
+[ -e "$APP_DATA/openclaw/tools" ] || [ -e "$APP_DATA/openclaw/bin" ] && old_prefix_detected=1
+[ -e "$APP_DATA/home/.openclaw" ] || [ -e "$APP_DATA/home/.config/gh" ] && old_home_detected=1
+if [ ! -e "$LAYOUT_MARKER" ]; then
+  if [ "$old_prefix_detected" -eq 1 ] && [ "$old_home_detected" -eq 1 ]; then
+    layout_tmp="$APP_DATA/.layout-swap.$$"
+    if [ -e "$layout_tmp" ]; then
+      echo "OpenClaw data layout migration blocked: temporary path already exists: $layout_tmp" >&2
+      exit 1
+    fi
+    mv "$APP_DATA/openclaw" "$layout_tmp"
+    mv "$APP_DATA/home" "$APP_DATA/openclaw"
+    mv "$layout_tmp" "$APP_DATA/home"
+  elif [ "$old_prefix_detected" -eq 1 ] && [ ! -e "$APP_DATA/home" ]; then
+    mv "$APP_DATA/openclaw" "$APP_DATA/home"
+    mkdir -p "$APP_DATA/openclaw"
+  elif [ "$old_home_detected" -eq 1 ] && [ ! -e "$APP_DATA/openclaw" ]; then
+    mv "$APP_DATA/home" "$APP_DATA/openclaw"
+    mkdir -p "$APP_DATA/home"
+  elif [ "$old_prefix_detected" -eq 1 ] || [ "$old_home_detected" -eq 1 ]; then
+    echo "OpenClaw data layout migration blocked: directory layout is incomplete or ambiguous" >&2
+    exit 1
+  fi
+fi
+if [ ! -e "$LAYOUT_MARKER" ]; then
+  : >"$LAYOUT_MARKER"
+  chmod 600 "$LAYOUT_MARKER"
+fi
+
+export OPENCLAW_APP_DATA="$APP_DATA"
+export OPENCLAW_PREFIX="$PREFIX"
+export OPENCLAW_DATA_DIR="$APP_DATA"
+export HOME="$HOME_DIR"
+export OPENCLAW_HOME="$HOME_DIR"
+export OPENCLAW_CONFIG_DIR="$HOME_DIR/.openclaw"
+export OPENCLAW_CONFIG_PATH="$HOME_DIR/.openclaw/openclaw.json"
+export OPENCLAW_WORKSPACE_DIR="$HOME_DIR/.openclaw/workspace"
+# The Gateway port belongs to OpenClaw's configuration file. 18790 is only
+# seeded into a brand-new config below; do not export a value that can override
+# an existing user setting.
+unset OPENCLAW_GATEWAY_PORT
+export OPENCLAW_ENTRY_PORT="18789"
+export GATEWAY_TOKEN_FILE="$APP_DATA/runtime/gateway.token"
+export OPENCLAW_RUNTIME_DIR="$APP_DATA/runtime"
+export GH_CONFIG_DIR="$HOME_DIR/.config/gh"
+export OPENCLAW_PID_FILE="${TRIM_PKGVAR:-$APP_DATA}/openclaw.pid"
+export OPENCLAW_LOG_FILE="${TRIM_PKGVAR:-$APP_DATA}/openclaw.log"
+export OPENCLAW_GATEWAY_PID_FILE="$OPENCLAW_RUNTIME_DIR/gateway.pid"
+export OPENCLAW_MANAGEMENT_PORT=""
+export OPENCLAW_MANAGEMENT_PREFIX="/app/openclaw"
+export OPENCLAW_MANAGEMENT_SOCKET="${TRIM_APPDEST:-$APP_HOME}/app.sock"
+# Keep the application runtime self-contained. Do not inherit a system Node/Bun
+# ahead of the private runtime; basic POSIX tools remain available for scripts.
+export PATH="$PREFIX/tools/gh/bin:$PREFIX/tools/node:$PREFIX/bin:/usr/local/bin:/usr/bin:/bin"
+
+mkdir -p "$PREFIX" "$HOME_DIR" "$OPENCLAW_CONFIG_DIR" "$OPENCLAW_WORKSPACE_DIR" "$OPENCLAW_RUNTIME_DIR" "$GH_CONFIG_DIR"
+
+# Create only the smallest official local-Gateway configuration on first run.
+# Never replace an existing user configuration during startup or upgrades.
+config_needs_init=0
+if [ ! -s "$OPENCLAW_CONFIG_PATH" ]; then
+  config_needs_init=1
+elif grep -q '\\n' "$OPENCLAW_CONFIG_PATH" 2>/dev/null; then
+  # Repair the malformed file emitted by pre-1.1.1 builds. Do not parse or
+  # rewrite other existing files: OpenClaw accepts JSON5, not only JSON.
+  config_needs_init=1
+fi
+if [ "$config_needs_init" -eq 1 ]; then
+  umask 077
+  config_tmp="$OPENCLAW_CONFIG_PATH.tmp.$$"
+  printf '%s\n' '{"gateway":{"mode":"local","port":18790}}' >"$config_tmp"
+  mv -f "$config_tmp" "$OPENCLAW_CONFIG_PATH"
+  chmod 600 "$OPENCLAW_CONFIG_PATH"
+fi
+
+# LAN binding requires Gateway authentication. Keep the generated credential
+# outside the package so upgrades do not rotate it or expose it in the FPK.
+if [ ! -s "$GATEWAY_TOKEN_FILE" ]; then
+  umask 077
+  if ! command -v od >/dev/null 2>&1 || ! command -v tr >/dev/null 2>&1; then
+    echo "od and tr are required to create the Gateway authentication token" >&2
+    exit 1
+  fi
+  head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$GATEWAY_TOKEN_FILE"
+  chmod 600 "$GATEWAY_TOKEN_FILE"
+fi
+export OPENCLAW_GATEWAY_TOKEN="$(cat "$GATEWAY_TOKEN_FILE")"
+# The fnOS unified gateway requires its socket in the installed target directory.

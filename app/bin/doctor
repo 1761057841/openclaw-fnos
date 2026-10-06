@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPT_DIR/env"
+echo "Gateway token file: $GATEWAY_TOKEN_FILE"
+echo "Gateway data: $APP_DATA"
+exec "$SCRIPT_DIR/openclaw" doctor "$@"

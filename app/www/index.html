@@ -1,0 +1,8 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>OpenClaw</title>
+<script>
+  // The fnOS desktop entry normally points directly at service_port. This
+  // fallback keeps the static app useful when opened through the CGI route.
+  location.replace('http://' + location.hostname + ':18789/');
+</script>

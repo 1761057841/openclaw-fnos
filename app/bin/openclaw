@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPT_DIR/env"
+
+if [ ! -x "$OPENCLAW_PREFIX/bin/openclaw" ]; then
+  "$SCRIPT_DIR/ensure-runtime"
+fi
+
+# Third-party tools are installed only by install-third-party-tool or the
+# service startup hook. Do not trigger network downloads for every CLI call.
+exec "$OPENCLAW_PREFIX/bin/openclaw" "$@"

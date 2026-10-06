@@ -1,0 +1,61 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPT_DIR/env"
+
+find_entry() {
+  if [ -f "$PREFIX/tools/node/lib/node_modules/openclaw/dist/entry.js" ]; then
+    printf '%s\n' "$PREFIX/tools/node/lib/node_modules/openclaw/dist/entry.js"
+    return 0
+  fi
+  for node_dir in "$PREFIX"/tools/node-v*/lib/node_modules/openclaw; do
+    if [ -f "$node_dir/dist/entry.js" ]; then
+      printf '%s\n' "$node_dir/dist/entry.js"
+      return 0
+    fi
+  done
+  return 1
+}
+
+ENTRY=$(find_entry) || {
+  echo "OpenClaw entry.js was not found under $PREFIX/tools" >&2
+  exit 1
+}
+NODE="$PREFIX/tools/node/bin/node"
+if [ ! -x "$NODE" ]; then
+  for candidate in "$PREFIX"/tools/node-v*/bin/node; do
+    if [ -x "$candidate" ]; then NODE="$candidate"; break; fi
+  done
+fi
+[ -x "$NODE" ] || { echo "private Node runtime was not found" >&2; exit 1; }
+
+umask 077
+TMP="$PREFIX/bin/openclaw.tmp.$$"
+cat >"$TMP" <<'EOF'
+#!/bin/sh
+set -eu
+PREFIX=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+NODE="$PREFIX/tools/node/bin/node"
+if [ ! -x "$NODE" ]; then
+  for candidate in "$PREFIX"/tools/node-v*/bin/node; do
+    if [ -x "$candidate" ]; then NODE="$candidate"; break; fi
+  done
+fi
+ENTRY="$PREFIX/tools/node/lib/node_modules/openclaw/dist/entry.js"
+if [ ! -f "$ENTRY" ]; then
+  for candidate in "$PREFIX"/tools/node-v*/lib/node_modules/openclaw/dist/entry.js; do
+    if [ -f "$candidate" ]; then ENTRY="$candidate"; break; fi
+  done
+fi
+[ -x "$NODE" ] && [ -f "$ENTRY" ] || { echo "OpenClaw runtime is incomplete" >&2; exit 1; }
+exec "$NODE" "$ENTRY" "$@"
+EOF
+chmod 700 "$TMP"
+mv -f "$TMP" "$PREFIX/bin/openclaw"
+
+"$PREFIX/bin/openclaw" --version >/dev/null 2>&1 || {
+  echo "repaired OpenClaw launcher is not runnable" >&2
+  exit 1
+}
+printf '%s\n' "$ENTRY"

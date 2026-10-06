@@ -1,0 +1,129 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPT_DIR/env"
+
+command -v curl >/dev/null 2>&1 || {
+  echo "Node.js 更新失败：系统没有 curl" >&2
+  exit 1
+}
+command -v bash >/dev/null 2>&1 || {
+  echo "Node.js 更新失败：系统没有 bash" >&2
+  exit 1
+}
+
+mkdir -p "$OPENCLAW_PREFIX" "$OPENCLAW_APP_DATA/runtime"
+NODE_INDEX="$OPENCLAW_APP_DATA/runtime/node-index.json"
+NODE_INDEX_TMP="$NODE_INDEX.tmp.$$"
+INSTALLER="$OPENCLAW_APP_DATA/runtime/install-cli.sh.tmp.$$"
+
+cleanup_tmp() {
+  rm -f "$NODE_INDEX_TMP" "$INSTALLER"
+}
+trap cleanup_tmp EXIT INT TERM
+
+TOOLS_DIR="$OPENCLAW_PREFIX/tools"
+ROLLBACK_DIR="$OPENCLAW_PREFIX/tools.rollback.$$"
+rollback_runtime() {
+  [ -d "$ROLLBACK_DIR" ] || return 0
+  rm -rf -- "$TOOLS_DIR.failed.$$"
+  [ ! -e "$TOOLS_DIR" ] || mv "$TOOLS_DIR" "$TOOLS_DIR.failed.$$"
+  mv "$ROLLBACK_DIR" "$TOOLS_DIR"
+  echo '已恢复更新前的私有 Node 和 OpenClaw 运行时。' >&2
+}
+
+fetch_file() {
+  url=$1
+  destination=$2
+  if ! curl -fL --retry 3 --retry-delay 2 --connect-timeout 15 --max-time 120 \
+      --proto '=https' --tlsv1.2 "$url" -o "$destination"; then
+    echo "下载失败（curl HTTP 错误）：$url" >&2
+    echo "请检查飞牛的 DNS、网络连接或 HTTPS 访问权限。" >&2
+    return 1
+  fi
+  [ -s "$destination" ] || { echo "下载结果为空：$url" >&2; return 1; }
+}
+
+find_node() {
+  NODE="$OPENCLAW_PREFIX/tools/node/bin/node"
+  if [ -x "$NODE" ]; then
+    return 0
+  fi
+  for candidate in "$OPENCLAW_PREFIX"/tools/node-v*/bin/node; do
+    if [ -x "$candidate" ]; then NODE="$candidate"; return 0; fi
+  done
+  return 1
+}
+
+# Resolve the newest official Node.js LTS instead of relying on the installer
+# default, which may remain at an older fixed version.
+fetch_file https://nodejs.org/dist/index.json "$NODE_INDEX_TMP"
+mv -f "$NODE_INDEX_TMP" "$NODE_INDEX"
+
+find_node || { echo "当前私有 Node 运行时不存在，无法读取更新前版本" >&2; exit 1; }
+BEFORE_VERSION=$("$NODE" --version)
+[ -n "$BEFORE_VERSION" ] || { echo "无法读取更新前 Node.js 版本" >&2; exit 1; }
+
+TARGET_VERSION=$("$NODE" -e '
+const fs=require("fs");
+const releases=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+const release=releases.find(x=>x.lts && !x.security);
+if(!release || !/^v[0-9]+\.[0-9]+\.[0-9]+$/.test(release.version)) process.exit(2);
+process.stdout.write(release.version.slice(1));
+' "$NODE_INDEX") || {
+  echo "无法从 Node.js 官方发布列表取得最新 LTS" >&2
+  exit 1
+}
+
+printf 'Node.js 更新前：%s\n' "$BEFORE_VERSION"
+printf 'Node.js 目标版本：v%s\n' "$TARGET_VERSION"
+
+if [ "$BEFORE_VERSION" = "v$TARGET_VERSION" ]; then
+  printf 'Node.js 已是最新 LTS 版本：%s\n' "$BEFORE_VERSION"
+else
+  # Keep the currently working runtime intact until the new Node and OpenClaw
+  # launcher are both verified. The installer writes under tools/ directly.
+  [ ! -e "$ROLLBACK_DIR" ] || { echo '运行时回滚目录已存在，拒绝继续更新。' >&2; exit 1; }
+  mv "$TOOLS_DIR" "$ROLLBACK_DIR"
+  mkdir -p "$TOOLS_DIR"
+  if ! fetch_file https://openclaw.ai/install-cli.sh "$INSTALLER"; then
+    rollback_runtime
+    exit 1
+  fi
+  if ! /bin/bash "$INSTALLER" --prefix "$OPENCLAW_PREFIX" --node-only --node-version "$TARGET_VERSION"; then
+    rollback_runtime
+    echo "Node.js 更新失败：官方安装器执行失败，目标版本 v$TARGET_VERSION" >&2
+    exit 1
+  fi
+fi
+
+find_node || { rollback_runtime; echo "Node.js 更新后找不到可执行文件" >&2; exit 1; }
+AFTER_VERSION=$({ "$NODE" --version || rollback_runtime; })
+[ -n "$AFTER_VERSION" ] || { rollback_runtime; echo "Node.js 更新后无法读取版本" >&2; exit 1; }
+
+if [ "$AFTER_VERSION" != "v$TARGET_VERSION" ]; then
+  rollback_runtime
+  echo "Node.js 更新结果异常：期望 v$TARGET_VERSION，实际 $AFTER_VERSION" >&2
+  exit 1
+fi
+
+# Node-only intentionally does not install OpenClaw. Refresh the CLI against
+# the new Node, but keep this separate from the Node result and report both.
+if ! fetch_file https://openclaw.ai/install-cli.sh "$INSTALLER"; then
+  rollback_runtime
+  exit 1
+fi
+if ! /bin/bash "$INSTALLER" --prefix "$OPENCLAW_PREFIX" --no-onboard --runtime-only --node-version "$TARGET_VERSION"; then
+  rollback_runtime
+  echo "Node.js 已更新到 $AFTER_VERSION，但 OpenClaw 运行时重建失败" >&2
+  exit 1
+fi
+/bin/sh "$SCRIPT_DIR/repair-openclaw" >/dev/null || { rollback_runtime; echo 'OpenClaw 启动器修复失败。' >&2; exit 1; }
+OPENCLAW_VERSION=$({ "$OPENCLAW_PREFIX/bin/openclaw" --version || rollback_runtime; })
+[ -n "$OPENCLAW_VERSION" ] || { rollback_runtime; echo "Node.js 已更新，但 OpenClaw 入口验证失败" >&2; exit 1; }
+
+/bin/sh "$SCRIPT_DIR/cleanup-runtime"
+rm -rf -- "$ROLLBACK_DIR"
+printf 'Node.js 更新后：%s\n' "$AFTER_VERSION"
+printf 'OpenClaw 入口验证：%s\n' "$OPENCLAW_VERSION"

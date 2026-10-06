@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+# Stop the previous application instance before fnOS replaces the payload.
+# Prefer the fnOS package PID location because the old payload may already be
+# unavailable while the upgrade hook is running.
+PID_FILE=""
+SOCKET_FILE=""
+if [ -n "${TRIM_APPDEST:-}" ]; then
+  SOCKET_FILE="$TRIM_APPDEST/app.sock"
+fi
+if [ -n "${TRIM_PKGVAR:-}" ]; then
+  PID_FILE="$TRIM_PKGVAR/openclaw.pid"
+fi
+if [ -n "$PID_FILE" ] && [ -s "$PID_FILE" ]; then
+  set -- $(cat "$PID_FILE" 2>/dev/null || true)
+  pid=${1:-}
+  started=${2:-}
+  case "$pid" in
+    ''|*[!0-9]*) ;;
+    *)
+      current=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true)
+      if [ -n "$started" ] && [ "$started" = "$current" ]; then
+        kill "$pid" 2>/dev/null || true
+        i=0
+        while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 20 ]; do
+          sleep 1
+          i=$((i + 1))
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+          kill -KILL "$pid" 2>/dev/null || true
+        fi
+      fi
+      ;;
+  esac
+  rm -f "$PID_FILE"
+fi
+if [ -n "$SOCKET_FILE" ]; then
+  rm -f "$SOCKET_FILE"
+fi
+exit 0

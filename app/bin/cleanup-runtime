@@ -1,0 +1,46 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPT_DIR/env"
+
+TOOLS_DIR="$PREFIX/tools"
+CURRENT_DIR=""
+
+# The installer maintains tools/node as the active runtime alias. Resolve it
+# before removing old node-v* directories, and never remove the active target.
+if [ -e "$TOOLS_DIR/node" ]; then
+  CURRENT_DIR=$(readlink -f "$TOOLS_DIR/node" 2>/dev/null || true)
+fi
+
+case "$CURRENT_DIR" in
+  "$TOOLS_DIR"/node-v*) : ;;
+  *) CURRENT_DIR="" ;;
+esac
+
+removed=0
+for candidate in "$TOOLS_DIR"/node-v*; do
+  [ -d "$candidate" ] || continue
+  resolved=$(readlink -f "$candidate" 2>/dev/null || printf '%s' "$candidate")
+  if [ -n "$CURRENT_DIR" ] && [ "$resolved" = "$CURRENT_DIR" ]; then
+    continue
+  fi
+  # Only remove directories owned by this application's runtime layout.
+  case "$candidate" in
+    "$TOOLS_DIR"/node-v*)
+      rm -rf -- "$candidate"
+      removed=$((removed + 1))
+      ;;
+  esac
+done
+
+# npm's download cache is disposable. Clear it only after a verified runtime
+# update; configuration and OpenClaw state live outside this cache.
+NPM="$TOOLS_DIR/node/bin/npm"
+if [ -x "$NPM" ]; then
+  "$NPM" cache clean --force >/dev/null 2>&1 || true
+fi
+
+# Remove only installer leftovers inside the private runtime prefix.
+find "$PREFIX" -maxdepth 1 -type f \( -name '*.tmp' -o -name '*.tgz' \) -delete 2>/dev/null || true
+printf '清理完成：删除旧 Node 运行时 %s 个，已清理 npm 缓存。\n' "$removed"

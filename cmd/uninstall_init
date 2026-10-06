@@ -1,0 +1,92 @@
+#!/bin/sh
+set -eu
+
+# Uninstall is data-safe by default. The application package is removed, but
+# the persistent data directory stays unless the uninstall context explicitly
+# requests deletion.
+APP_HOME="${TRIM_PKGHOME:-/vol1/@apphome/openclaw}"
+LEGACY_APP_HOME="${OPENCLAW_LEGACY_APP_HOME:-/vol1/@apphome/openclaw.fnos}"
+PID_FILE=""
+SOCKET_FILE=""
+if [ -n "${TRIM_APPDEST:-}" ]; then
+  SOCKET_FILE="$TRIM_APPDEST/app.sock"
+fi
+if [ -n "${TRIM_PKGVAR:-}" ]; then
+  PID_FILE="$TRIM_PKGVAR/openclaw.pid"
+fi
+
+# Stop the application before removing its package or data.
+if [ -n "$PID_FILE" ] && [ -s "$PID_FILE" ]; then
+  set -- $(cat "$PID_FILE" 2>/dev/null || true)
+  pid=${1:-}
+  started=${2:-}
+  case "$pid" in
+    ''|*[!0-9]*) ;;
+    *)
+      current=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true)
+      if [ -n "$started" ] && [ "$started" = "$current" ]; then
+        kill "$pid" 2>/dev/null || true
+        i=0
+        while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 20 ]; do
+          sleep 1
+          i=$((i + 1))
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+          kill -KILL "$pid" 2>/dev/null || true
+        fi
+      fi
+      ;;
+  esac
+  rm -f "$PID_FILE"
+fi
+if [ -n "$SOCKET_FILE" ]; then
+  rm -f "$SOCKET_FILE"
+fi
+
+MODE="${wizard_uninstall_data:-${TRIM_UNINSTALL_MODE:-${OPENCLAW_UNINSTALL_MODE:-keep-data}}}"
+for arg in "$@"; do
+  case "$arg" in
+    --delete-data|delete-data|remove-data) MODE="delete-data" ;;
+    --keep-data|keep-data) MODE="keep-data" ;;
+  esac
+done
+
+case "$MODE" in
+  keep-data|preserve-data)
+    printf '%s\n' 'OpenClaw 数据已保留：'"$APP_HOME/data"
+    if [ "$LEGACY_APP_HOME" != "$APP_HOME" ] && [ -d "$LEGACY_APP_HOME/data" ]; then
+      printf '%s\n' '兼容旧数据目录也已保留：'"$LEGACY_APP_HOME/data"
+    fi
+    ;;
+  delete-data|remove-data)
+    # Require an exact explicit mode. Never interpret an empty/unknown value
+    # as permission to delete persistent configuration or sessions.
+    if [ "$MODE" != "delete-data" ] && [ "$MODE" != "remove-data" ]; then
+      echo '拒绝删除：未收到明确的 delete-data 模式。' >&2
+      exit 1
+    fi
+    case "$APP_HOME" in
+      /vol[0-9]/*|/volume[0-9]/*)
+        if [ -d "$APP_HOME/data" ]; then
+          rm -rf -- "$APP_HOME/data"
+        fi
+        if [ "$LEGACY_APP_HOME" != "$APP_HOME" ] && [ -d "$LEGACY_APP_HOME/data" ]; then
+          rm -rf -- "$LEGACY_APP_HOME/data"
+        fi
+        printf '%s\n' 'OpenClaw 全部应用数据已删除。'
+        ;;
+      *)
+        echo "拒绝删除：应用数据路径不在受保护的 fnOS 数据卷中：$APP_HOME" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  *)
+    echo "未知卸载模式 '$MODE'；为安全起见保留数据。" >&2
+    printf '%s\n' 'OpenClaw 数据已保留：'"$APP_HOME/data"
+    if [ "$LEGACY_APP_HOME" != "$APP_HOME" ] && [ -d "$LEGACY_APP_HOME/data" ]; then
+      printf '%s\n' '兼容旧数据目录也已保留：'"$LEGACY_APP_HOME/data"
+    fi
+    ;;
+esac
+exit 0

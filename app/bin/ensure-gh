@@ -1,0 +1,96 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPT_DIR/env"
+
+GH_ROOT="$OPENCLAW_PREFIX/tools/gh"
+GH_BIN="$GH_ROOT/bin/gh"
+TMP_ROOT="$OPENCLAW_RUNTIME_DIR/gh-install.$$"
+ARCHIVE="$TMP_ROOT/gh.tar.gz"
+JSON="$TMP_ROOT/release.json"
+
+cleanup() {
+  rm -rf -- "$TMP_ROOT"
+}
+trap cleanup EXIT INT TERM
+
+# GitHub CLI is an optional application dependency. A failed download must not
+# prevent the OpenClaw management UI or Gateway from starting.
+if [ -x "$GH_BIN" ] && "$GH_BIN" --version >/dev/null 2>&1; then
+  exit 0
+fi
+command -v curl >/dev/null 2>&1 || { echo 'gh 安装跳过：系统没有 curl' >&2; exit 1; }
+command -v tar >/dev/null 2>&1 || { echo 'gh 安装跳过：系统没有 tar' >&2; exit 1; }
+command -v uname >/dev/null 2>&1 || { echo 'gh 安装跳过：系统没有 uname' >&2; exit 1; }
+
+case "$(uname -m)" in
+  x86_64|amd64) GH_ARCH=amd64 ;;
+  aarch64|arm64) GH_ARCH=arm64 ;;
+  *) echo "gh 安装跳过：不支持的 CPU 架构 $(uname -m)" >&2; exit 1 ;;
+esac
+
+mkdir -p "$TMP_ROOT"
+mkdir -p "$OPENCLAW_PREFIX/tools"
+if ! curl --http1.1 -fsSL --retry 3 --retry-delay 2 --connect-timeout 15 --max-time 60 \
+  --proto '=https' --tlsv1.2 \
+  -H 'Accept: application/vnd.github+json' \
+  -H 'User-Agent: openclaw-fnos' \
+  https://api.github.com/repos/cli/cli/releases/latest -o "$JSON"; then
+  echo 'gh 安装失败：获取 GitHub Release 信息失败（curl，HTTP/1.1）' >&2
+  exit 1
+fi
+
+# Extract only the official Linux tarball URL for this CPU. The JSON is parsed
+# with the private Node runtime when available; the fallback keeps first-run
+# installation working even if Node is being repaired.
+ASSET_URL=''
+NODE="$OPENCLAW_PREFIX/tools/node/bin/node"
+if [ -x "$NODE" ]; then
+  ASSET_URL=$("$NODE" -e '
+const fs=require("fs");
+const d=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+const arch=process.argv[2];
+const a=(d.assets||[]).find(x=>new RegExp("gh_[^/]+_linux_"+arch+"\\.tar\\.gz$").test(x.name));
+if(a) process.stdout.write(a.browser_download_url);
+' "$JSON" "$GH_ARCH")
+else
+  ASSET_URL=$(grep 'browser_download_url' "$JSON" | grep "linux_${GH_ARCH}\.tar\.gz" | sed -n 's/.*"browser_download_url": "\([^"]*\)".*/\1/p' | head -n 1)
+fi
+[ -n "$ASSET_URL" ] || { echo "gh 安装失败：找不到 Linux $GH_ARCH 官方安装包" >&2; exit 1; }
+
+if ! curl --http1.1 -fL --retry 3 --retry-delay 2 --connect-timeout 15 --max-time 180 \
+  --proto '=https' --tlsv1.2 "$ASSET_URL" -o "$ARCHIVE"; then
+  echo 'gh 安装失败：下载 GitHub CLI 官方压缩包失败（curl，HTTP/1.1）' >&2
+  exit 1
+fi
+[ -s "$ARCHIVE" ] || { echo 'gh 安装失败：下载结果为空' >&2; exit 1; }
+
+EXTRACT="$TMP_ROOT/extract"
+mkdir -p "$EXTRACT"
+tar -xzf "$ARCHIVE" -C "$EXTRACT"
+GH_SOURCE=$(find "$EXTRACT" -type f -path '*/bin/gh' -perm -u+x -print -quit)
+[ -n "$GH_SOURCE" ] || { echo 'gh 安装失败：官方压缩包中没有可执行文件' >&2; exit 1; }
+
+STAGED="$TMP_ROOT/gh"
+mkdir -p "$STAGED/bin"
+cp "$GH_SOURCE" "$STAGED/bin/gh"
+printf '%s\n' '{"name":"gh","executable":"bin/gh","source":"GitHub CLI"}' >"$STAGED/tool.json"
+chmod 600 "$STAGED/tool.json"
+chmod 700 "$STAGED/bin/gh"
+if [ -d "$(dirname "$GH_SOURCE")/../share" ]; then
+  cp -R "$(dirname "$GH_SOURCE")/../share" "$STAGED/"
+fi
+# Keep GitHub CLI metadata and extensions private to the application user.
+chmod 700 "$STAGED" "$STAGED/bin"
+
+OLD="$OPENCLAW_PREFIX/tools/gh.previous.$$"
+if [ -e "$GH_ROOT" ]; then mv "$GH_ROOT" "$OLD"; fi
+if ! mv "$STAGED" "$GH_ROOT"; then
+  [ ! -e "$OLD" ] || mv "$OLD" "$GH_ROOT"
+  echo 'gh 安装失败：无法切换应用私有目录' >&2
+  exit 1
+fi
+rm -rf -- "$OLD"
+
+"$GH_BIN" --version
