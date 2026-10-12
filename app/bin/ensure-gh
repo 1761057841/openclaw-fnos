@@ -75,7 +75,7 @@ GH_SOURCE=$(find "$EXTRACT" -type f -path '*/bin/gh' -perm -u+x -print -quit)
 STAGED="$TMP_ROOT/gh"
 mkdir -p "$STAGED/bin"
 cp "$GH_SOURCE" "$STAGED/bin/gh"
-printf '%s\n' '{"name":"gh","executable":"bin/gh","source":"GitHub CLI"}' >"$STAGED/tool.json"
+printf '%s\n' '{"name":"gh","description":"GitHub 官方命令行工具，用于管理仓库、Issue、Pull Request、Actions 和 GitHub API。","executable":"bin/gh","source":"GitHub CLI"}' >"$STAGED/tool.json"
 chmod 600 "$STAGED/tool.json"
 chmod 700 "$STAGED/bin/gh"
 if [ -d "$(dirname "$GH_SOURCE")/../share" ]; then

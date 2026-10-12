@@ -11,6 +11,9 @@ usage() {
   gh    GitHub CLI，安装到 $OPENCLAW_PREFIX/tools/gh
 
 本脚本只安装已批准工具；不接受 URL、归档文件路径或系统安装参数。
+
+每个工具安装目录必须包含 tool.json，用于管理页面识别工具、可执行文件
+和版本参数。工具没有版本命令时，将 versionArgs 设置为空数组。
 EOF
 }
 

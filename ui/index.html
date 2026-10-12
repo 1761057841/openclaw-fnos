@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>OpenClaw</title>
+    <style>
+      :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+      body { margin: 0; padding: 32px; background: #f4f6f8; color: #18212b; }
+      main { max-width: 720px; margin: 0 auto; }
+      h1 { margin: 0 0 8px; font-size: 28px; }
+      p { color: #5d6874; }
+      .actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 24px; }
+      a, button { border: 1px solid #c7d0d9; border-radius: 6px; padding: 10px 14px; background: white; color: inherit; text-decoration: none; cursor: pointer; }
+      @media (prefers-color-scheme: dark) { body { background: #15191e; color: #e7edf3; } a, button { background: #20262d; border-color: #3a4652; } p { color: #9ba8b5; } }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>OpenClaw</h1>
+      <p>fnOS 应用入口。Gateway、模型、Agent、技能和更新由 OpenClaw 官方运行时负责。</p>
+      <div class="actions">
+        <a href="/gateway/">打开 OpenClaw 控制台</a>
+        <button type="button" onclick="location.reload()">刷新状态</button>
+      </div>
+    </main>
+  </body>
+</html>

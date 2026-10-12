@@ -27,17 +27,9 @@ fi
 rm -f "$OPENCLAW_MANAGEMENT_SOCKET"
 
 find_node() {
-  NODE_BIN="$PREFIX/tools/node/bin/node"
-  if [ -x "$NODE_BIN" ]; then
-    return 0
-  fi
-  for candidate in "$PREFIX"/tools/node-v*/bin/node; do
-    if [ -x "$candidate" ]; then
-      NODE_BIN="$candidate"
-      return 0
-    fi
-  done
-  return 1
+  resolve_node "$PREFIX" || return 1
+  NODE_BIN="$RESOLVED_NODE"
+  return 0
 }
 
 # Prepare or repair the private runtime at most once. The management UI only
@@ -68,26 +60,29 @@ log "[management] UI child started pid=$UI_PID"
 ) &
 GH_INSTALL_PID=$!
 
-# Gateway is a separate child. Runtime preparation already happened once;
-# failure here must not take down the management UI.
-GATEWAY_PID=""
-if [ -x "$PREFIX/bin/openclaw" ] && "$PREFIX/bin/openclaw" --version >/dev/null 2>&1; then
-  # Let OpenClaw resolve the port from openclaw.json. The wrapper only seeds
-  # 18790 when creating a brand-new configuration.
-  "$SCRIPT_DIR/openclaw" gateway run --bind lan --allow-unconfigured >>"$OPENCLAW_LOG_FILE" 2>&1 &
-  GATEWAY_PID=$!
-  echo "$GATEWAY_PID" >"$OPENCLAW_GATEWAY_PID_FILE"
-else
-  log '[gateway] OpenClaw runtime is unavailable; management UI remains available'
-  rm -f "$OPENCLAW_GATEWAY_PID_FILE"
-fi
-
+# The management UI is the single Gateway lifecycle owner. Keeping Gateway
+# start/stop/restart in one process prevents the supervisor and UI from
+# overwriting each other's PID state or leaving an orphan after a UI action.
 cleanup() {
-  if [ -n "$GATEWAY_PID" ]; then kill "$GATEWAY_PID" 2>/dev/null || true; fi
+  if [ -s "$OPENCLAW_GATEWAY_PID_FILE" ]; then
+    set -- $(cat "$OPENCLAW_GATEWAY_PID_FILE" 2>/dev/null || true)
+    GATEWAY_PID=${1:-}
+    GATEWAY_STARTED=${2:-}
+    case "$GATEWAY_PID" in
+      ''|*[!0-9]*) ;;
+      *)
+        CURRENT_STARTED=$(awk '{print $22}' "/proc/$GATEWAY_PID/stat" 2>/dev/null || true)
+        if [ -n "$GATEWAY_STARTED" ] && [ "$GATEWAY_STARTED" = "$CURRENT_STARTED" ]; then
+          kill "$GATEWAY_PID" 2>/dev/null || true
+          wait "$GATEWAY_PID" 2>/dev/null || true
+        fi
+        ;;
+    esac
+  fi
   if [ -n "${GH_INSTALL_PID:-}" ]; then kill "$GH_INSTALL_PID" 2>/dev/null || true; fi
   kill "$UI_PID" 2>/dev/null || true
-  wait "$GATEWAY_PID" 2>/dev/null || true
   wait "$UI_PID" 2>/dev/null || true
+  rm -f "$OPENCLAW_GATEWAY_PID_FILE"
 }
 trap cleanup EXIT INT TERM
 

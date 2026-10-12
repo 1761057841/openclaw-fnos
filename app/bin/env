@@ -61,7 +61,6 @@ fi
 
 export OPENCLAW_APP_DATA="$APP_DATA"
 export OPENCLAW_PREFIX="$PREFIX"
-export OPENCLAW_DATA_DIR="$APP_DATA"
 export HOME="$HOME_DIR"
 export OPENCLAW_HOME="$HOME_DIR"
 export OPENCLAW_CONFIG_DIR="$HOME_DIR/.openclaw"
@@ -71,11 +70,9 @@ export OPENCLAW_WORKSPACE_DIR="$HOME_DIR/.openclaw/workspace"
 # seeded into a brand-new config below; do not export a value that can override
 # an existing user setting.
 unset OPENCLAW_GATEWAY_PORT
-export OPENCLAW_ENTRY_PORT="18789"
 export GATEWAY_TOKEN_FILE="$APP_DATA/runtime/gateway.token"
 export OPENCLAW_RUNTIME_DIR="$APP_DATA/runtime"
 export GH_CONFIG_DIR="$HOME_DIR/.config/gh"
-export OPENCLAW_PID_FILE="${TRIM_PKGVAR:-$APP_DATA}/openclaw.pid"
 export OPENCLAW_LOG_FILE="${TRIM_PKGVAR:-$APP_DATA}/openclaw.log"
 export OPENCLAW_GATEWAY_PID_FILE="$OPENCLAW_RUNTIME_DIR/gateway.pid"
 export OPENCLAW_MANAGEMENT_PORT=""
@@ -84,6 +81,20 @@ export OPENCLAW_MANAGEMENT_SOCKET="${TRIM_APPDEST:-$APP_HOME}/app.sock"
 # Keep the application runtime self-contained. Do not inherit a system Node/Bun
 # ahead of the private runtime; basic POSIX tools remain available for scripts.
 export PATH="$PREFIX/tools/gh/bin:$PREFIX/tools/node:$PREFIX/bin:/usr/local/bin:/usr/bin:/bin"
+
+
+# Shared Node resolution: prefer the maintained tools/node alias, then the newest
+# versioned node-v* directory. Usage: resolve_node <prefix>; sets RESOLVED_NODE.
+resolve_node() {
+  _prefix=$1
+  RESOLVED_NODE="$_prefix/tools/node/bin/node"
+  if [ -x "$RESOLVED_NODE" ]; then return 0; fi
+  for _candidate in "$_prefix"/tools/node-v*/bin/node; do
+    if [ -x "$_candidate" ]; then RESOLVED_NODE="$_candidate"; return 0; fi
+  done
+  RESOLVED_NODE=""
+  return 1
+}
 
 mkdir -p "$PREFIX" "$HOME_DIR" "$OPENCLAW_CONFIG_DIR" "$OPENCLAW_WORKSPACE_DIR" "$OPENCLAW_RUNTIME_DIR" "$GH_CONFIG_DIR"
 

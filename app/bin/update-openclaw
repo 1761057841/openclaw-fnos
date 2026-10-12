@@ -1,8 +1,9 @@
 #!/bin/sh
 set -eu
 
+# The application owns its own package download, validation, replacement and
+# rollback. Do not delegate to `openclaw update`, which would bypass the
+# management updater, its lock, and its rollback guarantees.
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-. "$SCRIPT_DIR/env"
-
-"$SCRIPT_DIR/ensure-runtime"
-exec "$OPENCLAW_PREFIX/bin/openclaw" update "$@"
+echo "OpenClaw 更新已由应用托管，请使用管理页面的更新按钮，或运行 $SCRIPT_DIR/update-openclaw-package。" >&2
+exec "$SCRIPT_DIR/update-openclaw-package" "$@"

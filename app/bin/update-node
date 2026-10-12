@@ -46,14 +46,9 @@ fetch_file() {
 }
 
 find_node() {
-  NODE="$OPENCLAW_PREFIX/tools/node/bin/node"
-  if [ -x "$NODE" ]; then
-    return 0
-  fi
-  for candidate in "$OPENCLAW_PREFIX"/tools/node-v*/bin/node; do
-    if [ -x "$candidate" ]; then NODE="$candidate"; return 0; fi
-  done
-  return 1
+  resolve_node "$OPENCLAW_PREFIX" || return 1
+  NODE="$RESOLVED_NODE"
+  return 0
 }
 
 # Resolve the newest official Node.js LTS instead of relying on the installer

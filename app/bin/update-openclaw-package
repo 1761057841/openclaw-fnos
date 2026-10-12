@@ -1,0 +1,294 @@
+#!/bin/sh
+# Update only the installed OpenClaw npm package.  This deliberately avoids
+# `openclaw update`: the application keeps ownership of download, validation,
+# replacement, rollback, and Gateway lifecycle.
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPT_DIR/env"
+
+check_only=0
+if [ "${1:-}" = "--check" ]; then
+  check_only=1
+elif [ "$#" -ne 0 ]; then
+  echo "usage: $0 [--check]" >&2
+  exit 64
+fi
+
+resolve_node "$OPENCLAW_PREFIX" || { echo "private Node runtime was not found" >&2; exit 1; }
+NODE="$RESOLVED_NODE"
+command -v curl >/dev/null 2>&1 || { echo "curl is required to update OpenClaw" >&2; exit 1; }
+command -v tar >/dev/null 2>&1 || { echo "tar is required to update OpenClaw" >&2; exit 1; }
+
+package_dir="$OPENCLAW_PREFIX/tools/node/lib/node_modules/openclaw"
+if [ ! -f "$package_dir/package.json" ]; then
+  package_dir=""
+  for candidate in "$OPENCLAW_PREFIX"/tools/node-v*/lib/node_modules/openclaw; do
+    if [ -f "$candidate/package.json" ]; then package_dir="$candidate"; break; fi
+  done
+fi
+[ -n "$package_dir" ] && [ -f "$package_dir/package.json" ] || { echo "installed OpenClaw package was not found" >&2; exit 1; }
+
+package_name=$("$NODE" -e 'const p=require(process.argv[1]); if(!/^[a-z0-9@/._-]+$/i.test(p.name||"")) process.exit(2); process.stdout.write(p.name)' "$package_dir/package.json")
+current_version=$("$NODE" -e 'const p=require(process.argv[1]); process.stdout.write(p.version||"")' "$package_dir/package.json")
+[ -n "$package_name" ] && [ -n "$current_version" ] || { echo "installed package metadata is invalid" >&2; exit 1; }
+
+registry="https://registry.npmjs.org/${package_name}/latest"
+metadata=$(curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 60 "$registry") || { echo "could not download npm package metadata" >&2; exit 1; }
+metadata_file=$(mktemp "${TMPDIR:-/tmp}/openclaw-package-metadata.XXXXXX")
+printf '%s' "$metadata" >"$metadata_file"
+update_lock="$OPENCLAW_RUNTIME_DIR/package-update.lock"
+status_file="$OPENCLAW_RUNTIME_DIR/package-update-status.json"
+holds_update_lock=0
+status_phase=starting
+status_percent=0
+write_status() {
+  status_phase=$1
+  phase=$1
+  percent=$2
+  status_percent=$2
+  message=$3
+  printf '{"phase":"%s","percent":%s,"message":"%s","updatedAt":"%s"}\n' "$phase" "$percent" "$(printf '%s' "$message" | sed 's/[\\\\\"]/[\\\\&]/g')" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >"$status_file.tmp.$$"
+  mv -f "$status_file.tmp.$$" "$status_file"
+}
+cleanup() {
+  exit_code=$?
+  if [ "$exit_code" -ne 0 ] && [ "$status_phase" != failed ] && [ "$status_phase" != success ]; then
+    write_status failed "$status_percent" "更新进程异常退出，最后阶段：${status_phase}。请查看运行日志。"
+  fi
+  rm -f "$metadata_file" "${tarball_file:-}" "$status_file.tmp.$$"
+  rm -rf "${stage_dir:-}"
+  [ "$holds_update_lock" -eq 0 ] || rm -rf "$update_lock"
+}
+trap cleanup EXIT
+
+# Print URL, integrity and semantic package version only after validating the
+# registry response. The tarball must remain on the npm registry over HTTPS.
+set -- $("$NODE" - "$metadata_file" "$package_name" <<'NODE'
+const fs=require('fs');
+const [file, expected]=process.argv.slice(2);
+const data=JSON.parse(fs.readFileSync(file,'utf8'));
+const dist=data.dist || {};
+if (data.name !== expected || !/^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$/.test(data.version || '') ||
+    typeof dist.tarball !== 'string' || !/^https:\/\/registry\.npmjs\.org\//.test(dist.tarball) ||
+    typeof dist.integrity !== 'string' || !/^sha(?:256|384|512)-[A-Za-z0-9+/=]+$/.test(dist.integrity)) process.exit(2);
+process.stdout.write(`${data.version}\n${dist.tarball}\n${dist.integrity}\n`);
+NODE
+) || { echo "npm registry metadata failed validation" >&2; exit 1; }
+target_version=$1
+tarball_url=$2
+integrity=$3
+
+updating=0
+if [ -e "$update_lock" ]; then
+  lock_pid=$(cat "$update_lock/pid" 2>/dev/null || true)
+  if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+    updating=1
+  else
+    rm -rf "$update_lock"
+  fi
+fi
+
+if [ "$check_only" -eq 1 ]; then
+  "$NODE" -e 'const [installed,latest,updating]=process.argv.slice(1); process.stdout.write(JSON.stringify({ok:true,installed,latest,available:installed!==latest,channel:"npm-stable",updating:Number(updating)===1}))' "$current_version" "$target_version" "$updating"
+  exit 0
+fi
+
+if [ "$target_version" = "$current_version" ]; then
+  echo "OpenClaw is already ${current_version}; no package replacement needed."
+  exit 0
+fi
+
+if [ "$updating" -eq 1 ]; then
+  echo "another OpenClaw package update is already running (PID $lock_pid)" >&2
+  exit 1
+fi
+rm -rf "$update_lock"
+mkdir "$update_lock" || { echo "could not acquire OpenClaw package update lock" >&2; exit 1; }
+holds_update_lock=1
+printf '%s\n' "$$" >"$update_lock/pid"
+write_status downloading 0 "正在从 npm 下载 OpenClaw ${target_version}..."
+echo "Downloading OpenClaw ${target_version} from the npm registry..."
+tarball_file=$(mktemp "${TMPDIR:-/tmp}/openclaw-package.XXXXXX.tgz")
+progress_file=$(mktemp "${TMPDIR:-/tmp}/openclaw-package-progress.XXXXXX")
+curl --fail --silent --show-error --location --progress-bar --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 300 "$tarball_url" -o "$tarball_file" 2>"$progress_file" &
+download_pid=$!
+while kill -0 "$download_pid" 2>/dev/null; do
+  progress=$(tr '\\r' '\\n' <"$progress_file" | sed -n 's/.* \\([0-9][0-9]*\\)% .*/\\1/p' | tail -1)
+  case "$progress" in ''|*[!0-9]*) ;; *) write_status downloading "$progress" "正在下载 OpenClaw ${target_version}（${progress}%）..." ;; esac
+  sleep 1
+done
+if ! wait "$download_pid"; then
+  write_status failed 0 "下载 OpenClaw 程序包失败。"
+  echo "could not download OpenClaw package tarball" >&2
+  exit 1
+fi
+write_status verifying 20 "下载完成，正在校验程序包完整性..."
+if ! "$NODE" - "$tarball_file" "$integrity" <<'NODE'
+const fs=require('fs'), crypto=require('crypto');
+const [file, expected]=process.argv.slice(2);
+const match=/^(sha(?:256|384|512))-(.+)$/.exec(expected);
+if(!match) process.exit(2);
+const actual=crypto.createHash(match[1]).update(fs.readFileSync(file)).digest('base64');
+if(!crypto.timingSafeEqual(Buffer.from(actual), Buffer.from(match[2]))) process.exit(1);
+NODE
+then
+  write_status failed 20 "程序包完整性校验失败。"
+  echo "downloaded OpenClaw package failed integrity verification" >&2
+  exit 1
+fi
+write_status verifying 35 "完整性校验通过，正在解压并检查程序包..."
+stage_dir=$(mktemp -d "${TMPDIR:-/tmp}/openclaw-package-stage.XXXXXX")
+if ! tar -xzf "$tarball_file" -C "$stage_dir" --no-same-owner --no-same-permissions; then
+  write_status failed 35 "程序包解压失败。"
+  echo "could not extract OpenClaw package tarball" >&2
+  exit 1
+fi
+new_dir="$stage_dir/package"
+if [ ! -f "$new_dir/package.json" ]; then
+  write_status failed 35 "程序包目录结构异常。"
+  echo "package tarball has an unexpected layout" >&2
+  exit 1
+fi
+if ! "$NODE" - "$new_dir/package.json" "$package_name" "$target_version" <<'NODE' 
+const p=require(process.argv[2]);
+if(p.name !== process.argv[3] || p.version !== process.argv[4] || !p.bin) process.exit(1);
+NODE
+then
+  write_status failed 35 "程序包元数据与 npm registry 不一致。"
+  echo "package tarball metadata does not match registry metadata" >&2
+  exit 1
+fi
+if [ ! -f "$new_dir/dist/entry.js" ]; then
+  write_status failed 35 "程序包缺少必要文件 dist/entry.js。"
+  echo "package tarball is missing dist/entry.js" >&2
+  exit 1
+fi
+NPM="$OPENCLAW_PREFIX/tools/node/bin/npm"
+if [ ! -x "$NPM" ]; then
+  for candidate in "$OPENCLAW_PREFIX"/tools/node-v*/bin/npm; do
+    if [ -x "$candidate" ]; then NPM="$candidate"; break; fi
+  done
+fi
+if [ ! -x "$NPM" ]; then
+  write_status failed 40 "找不到应用私有 npm，无法安装新程序包依赖。"
+  echo "private npm runtime was not found" >&2
+  exit 1
+fi
+# npm's launcher uses /usr/bin/env node. The fnOS runtime may live under a
+# versioned node-v* directory, so expose the matching bin directory explicitly.
+export PATH="$(dirname "$NPM"):$OPENCLAW_PREFIX/tools/gh/bin:$OPENCLAW_PREFIX/bin:/usr/local/bin:/usr/bin:/bin"
+write_status installing 40 "程序包本体校验通过，正在安装 OpenClaw 生产依赖..."
+npm_output=''
+if ! npm_output=$(cd "$new_dir" && "$NPM" install --omit=dev --legacy-peer-deps --no-package-lock --no-audit --no-fund 2>&1); then
+  npm_output=$(printf '%s' "$npm_output" | tr '\n' ' ' | cut -c1-320)
+  write_status failed 40 "OpenClaw 生产依赖安装失败：${npm_output:-npm 执行失败}。"
+  printf '%s\n' "OpenClaw dependency installation failed: ${npm_output:-no output}" >&2
+  exit 1
+fi
+if [ ! -d "$new_dir/node_modules/@openclaw/fs-safe" ]; then
+  write_status failed 40 "新程序包缺少 @openclaw/fs-safe 运行时依赖。"
+  echo "installed package is missing @openclaw/fs-safe" >&2
+  exit 1
+fi
+write_status stopping 45 "程序包及生产依赖校验通过，正在准备切换 Gateway..."
+
+backup_dir="$OPENCLAW_RUNTIME_DIR/package-update-backup.$$"
+replaced=0
+rollback() {
+  [ "$replaced" -eq 1 ] || return 0
+  echo "Update failed; restoring OpenClaw ${current_version}." >&2
+  rm -rf "$package_dir"
+  mv "$backup_dir" "$package_dir"
+  replaced=0
+}
+gateway_was_running=0
+if ! overview=$(curl --silent --show-error --unix-socket "$OPENCLAW_MANAGEMENT_SOCKET" -H 'x-trim-isadmin: true' "http://localhost${OPENCLAW_MANAGEMENT_PREFIX}/api/overview"); then
+  write_status failed 45 "无法读取 Gateway 当前状态，更新已取消。"
+  echo "could not read Gateway state" >&2
+  exit 1
+fi
+if printf '%s' "$overview" | grep -q '"gateway":true'; then gateway_was_running=1; fi
+restart() {
+  [ "$gateway_was_running" -eq 1 ] || return 0
+  curl --fail --silent --show-error --unix-socket "$OPENCLAW_MANAGEMENT_SOCKET" -H 'x-trim-isadmin: true' -H 'content-type: application/json' --data '{"action":"start"}' "http://localhost${OPENCLAW_MANAGEMENT_PREFIX}/api/action" >/dev/null
+}
+wait_for_gateway() {
+  expected=$1
+  i=0
+  # Gateway shutdown declares a 325s budget in its own log; use a matching
+  # lifecycle timeout instead of failing after the old 20s probe window.
+  while [ "$i" -lt 360 ]; do
+    overview=$(curl --silent --show-error --unix-socket "$OPENCLAW_MANAGEMENT_SOCKET" -H 'x-trim-isadmin: true' "http://localhost${OPENCLAW_MANAGEMENT_PREFIX}/api/overview" 2>/dev/null || true)
+    if [ "$expected" = running ] && printf '%s' "$overview" | grep -q '"gateway":true'; then return 0; fi
+    if [ "$expected" = stopped ] && printf '%s' "$overview" | grep -q '"gateway":false'; then return 0; fi
+    i=$((i + 1)); sleep 1
+  done
+  return 1
+}
+finish_failure() {
+  rollback
+  restart || true
+  if [ "$gateway_was_running" -eq 1 ]; then wait_for_gateway running || true; fi
+  exit 1
+}
+
+if [ "$gateway_was_running" -eq 1 ]; then
+  write_status stopping 50 "正在停止 Gateway..."
+  if ! curl --fail --silent --show-error --unix-socket "$OPENCLAW_MANAGEMENT_SOCKET" -H 'x-trim-isadmin: true' -H 'content-type: application/json' --data '{"action":"stop"}' "http://localhost${OPENCLAW_MANAGEMENT_PREFIX}/api/action" >/dev/null; then
+    write_status failed 50 "停止 Gateway 失败，未替换程序包。"
+    echo "could not stop Gateway before package replacement" >&2
+    exit 1
+  fi
+  if ! wait_for_gateway stopped; then
+    write_status failed 50 "Gateway 停止超时，未替换程序包。"
+    echo "Gateway did not stop; refusing to replace the running package" >&2
+    restart || true
+    exit 1
+  fi
+fi
+
+# Both paths are on the same filesystem, so the directory switch is atomic.
+write_status replacing 65 "Gateway 已停止，正在替换 OpenClaw 程序包..."
+if ! mv "$package_dir" "$backup_dir" || ! mv "$new_dir" "$package_dir"; then
+  write_status failed 65 "程序包切换失败，正在恢复旧版本..."
+  if [ -e "$backup_dir" ] && [ ! -e "$package_dir" ]; then mv "$backup_dir" "$package_dir" || true; fi
+  restart || true
+  if [ "$gateway_was_running" -eq 1 ]; then wait_for_gateway running || true; fi
+  exit 1
+fi
+replaced=1
+
+write_status checking 75 "程序包已替换，正在执行启动器和版本自检..."
+self_check_error=''
+if ! self_check_error=$(/bin/sh "$SCRIPT_DIR/repair-openclaw" 2>&1); then
+  self_check_error=$(printf '%s' "$self_check_error" | tr '\n' ' ' | cut -c1-240)
+  printf '%s\n' "OpenClaw self-check failed: ${self_check_error:-repair-openclaw exited unsuccessfully}" >&2
+  write_status failed 75 "新程序包自检失败：${self_check_error:-repair-openclaw 执行失败}，正在回滚旧版本..."
+  finish_failure
+fi
+if ! self_check_error=$("$OPENCLAW_PREFIX/bin/openclaw" --version 2>&1); then
+  self_check_error=$(printf '%s' "$self_check_error" | tr '\n' ' ' | cut -c1-240)
+  printf '%s\n' "OpenClaw version check failed: ${self_check_error:-openclaw --version exited unsuccessfully}" >&2
+  write_status failed 75 "OpenClaw 版本自检失败：${self_check_error:-命令执行失败}，正在回滚旧版本..."
+  finish_failure
+fi
+
+if [ "$gateway_was_running" -eq 1 ]; then
+  write_status starting 85 "自检通过，正在恢复 Gateway..."
+  if ! restart || ! wait_for_gateway running; then
+    write_status failed 85 "Gateway 恢复失败，正在回滚旧版本..."
+    finish_failure
+  fi
+fi
+
+# A successful replacement has a running Gateway. The previous package is no
+# longer needed and is deliberately deleted as requested.
+if ! rm -rf "$backup_dir"; then
+  write_status failed 95 "更新已完成但旧程序包备份清理失败，请检查运行时目录。"
+  echo "updated package but could not remove temporary backup: $backup_dir" >&2
+  exit 1
+fi
+replaced=0
+write_status success 100 "OpenClaw 已更新：${current_version} -> ${target_version}。"
+echo "OpenClaw package updated: ${current_version} -> ${target_version}. Temporary backup removed."

@@ -22,13 +22,8 @@ ENTRY=$(find_entry) || {
   echo "OpenClaw entry.js was not found under $PREFIX/tools" >&2
   exit 1
 }
-NODE="$PREFIX/tools/node/bin/node"
-if [ ! -x "$NODE" ]; then
-  for candidate in "$PREFIX"/tools/node-v*/bin/node; do
-    if [ -x "$candidate" ]; then NODE="$candidate"; break; fi
-  done
-fi
-[ -x "$NODE" ] || { echo "private Node runtime was not found" >&2; exit 1; }
+resolve_node "$PREFIX" || { echo "private Node runtime was not found" >&2; exit 1; }
+NODE="$RESOLVED_NODE"
 
 umask 077
 TMP="$PREFIX/bin/openclaw.tmp.$$"
@@ -54,8 +49,10 @@ EOF
 chmod 700 "$TMP"
 mv -f "$TMP" "$PREFIX/bin/openclaw"
 
-"$PREFIX/bin/openclaw" --version >/dev/null 2>&1 || {
-  echo "repaired OpenClaw launcher is not runnable" >&2
+launcher_output=''
+if ! launcher_output=$("$PREFIX/bin/openclaw" --version 2>&1); then
+  printf '%s\n' "repaired OpenClaw launcher is not runnable: ${launcher_output:-no output}" >&2
   exit 1
-}
+fi
+printf '%s\n' "$launcher_output" >/dev/null
 printf '%s\n' "$ENTRY"

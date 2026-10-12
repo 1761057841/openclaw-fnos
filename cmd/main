@@ -61,6 +61,14 @@ prepare_app_data() {
     chown "$PACKAGE_USER:$SOCKET_GROUP" "$GATEWAY_TOKEN_FILE"
     chmod 600 "$GATEWAY_TOKEN_FILE"
   fi
+  # Backups may be copied onto a new fnOS device by root or a file manager.
+  # Repair only the dedicated backup directory and its archive files so the
+  # package user can list and restore them without changing unrelated data.
+  BACKUP_DIR="$(dirname -- "$OPENCLAW_APP_DATA")/backups"
+  mkdir -p "$BACKUP_DIR"
+  chown "$PACKAGE_USER:$SOCKET_GROUP" "$BACKUP_DIR"
+  chmod 700 "$BACKUP_DIR"
+  find "$BACKUP_DIR" -maxdepth 1 -type f -name 'openclaw-full-*.tar.gz' -exec chown "$PACKAGE_USER:$SOCKET_GROUP" {} + -exec chmod 600 {} + 2>/dev/null || true
 }
 
 start_as_package_user() {
